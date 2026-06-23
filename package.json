@@ -1,0 +1,16 @@
+{
+  "name": "human-friendly-diff",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Intent-grouped HTML reviews for Git working-tree diffs",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "capture": "node scripts/capture.mjs",
+    "render": "node scripts/render.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
