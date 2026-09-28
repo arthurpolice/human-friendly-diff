@@ -1,6 +1,6 @@
 {
   "name": "human-friendly-diff",
-  "version": "0.1.0+codex.20260928011830",
+  "version": "0.1.0+codex.20260928015406",
   "description": "Turn a branch comparison into a story-driven local HTML review.",
   "author": {
     "name": "Arthur Police",
