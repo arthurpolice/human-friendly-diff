@@ -1,10 +1,12 @@
 # Human-Friendly Diff
 
-Human-Friendly Diff is a local Codex plugin that turns the current Git
-working-tree diff into a story-driven slide presentation.
+Human-Friendly Diff is a local Codex plugin that turns a current-branch vs
+target-branch comparison into a story-driven slide presentation.
 
 It opens with production/test/other change-line totals and a functional module
-map, then walks through chronological system stories. Each beat shows only the
+map, then walks through chronological system stories. The capture uses the
+merge base of the target branch and current `HEAD`, matching a pull request;
+staged, unstaged, and untracked files are excluded. Each beat shows only the
 relevant exact diff excerpt, with bounded full-file before/after snapshots for
 GitHub-like context expansion. A deterministic zero-dependency Node.js renderer
 creates one self-contained dark HTML deck.
@@ -31,7 +33,7 @@ repository are retained.
 ## Manual development workflow
 
 ```sh
-node scripts/capture.mjs --repo /path/to/repo --output /tmp/capture.json
+node scripts/capture.mjs --repo /path/to/repo --base main --output /tmp/capture.json
 node scripts/render.mjs \
   --capture /tmp/capture.json \
   --analysis examples/analysis.example.json \

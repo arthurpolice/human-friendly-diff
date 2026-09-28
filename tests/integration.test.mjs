@@ -26,10 +26,12 @@ function fixtureRepo() {
   writeFileSync(resolve(repo, "README.md"), "# Fixture\n");
   run("git", ["add", "."], repo);
   run("git", ["commit", "-qm", "initial"], repo);
+  run("git", ["branch", "-M", "main"], repo);
+  run("git", ["switch", "-qc", "feature"], repo);
   return repo;
 }
 
-test("capture combines staged, unstaged, and untracked changes with stable hunk IDs", () => {
+test("capture compares committed branch changes to its target and ignores the working tree", () => {
   const repo = fixtureRepo();
   const capturePath = resolve(repo, "capture.json");
 
@@ -37,31 +39,38 @@ test("capture combines staged, unstaged, and untracked changes with stable hunk 
     resolve(repo, "checkout.js"),
     "export function submit(order) {\n  if (!order.id) throw new Error('missing id');\n  return order.id;\n}\n",
   );
-  run("git", ["add", "checkout.js"], repo);
+  writeFileSync(resolve(repo, "checkout.test.js"), "import { submit } from './checkout.js';\nsubmit({ id: 42 });\n");
+  run("git", ["add", "checkout.js", "checkout.test.js"], repo);
+  run("git", ["commit", "-qm", "validate checkout"], repo);
   writeFileSync(
     resolve(repo, "checkout.js"),
     "export function submit(order) {\n  if (!order.id) throw new Error('missing id');\n  return String(order.id);\n}\n",
   );
   writeFileSync(resolve(repo, "token.js"), "export const apiKey = 'super-secret-value';\n");
-  writeFileSync(resolve(repo, "checkout.test.js"), "import { submit } from './checkout.js';\nsubmit({ id: 42 });\n");
 
-  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT);
+  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--base", "main", "--output", capturePath], ROOT);
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
 
   assert.equal(capture.clean, false);
-  assert.equal(capture.schemaVersion, "human-friendly-diff.capture/v2");
+  assert.equal(capture.schemaVersion, "human-friendly-diff.capture/v3");
   assert.equal(capture.repository.name, repo.split("/").at(-1));
-  assert.ok(capture.files.some((file) => file.path === "checkout.js" && file.stageState === "mixed"));
-  assert.ok(capture.files.some((file) => file.path === "token.js"));
+  assert.equal(capture.repository.target.ref, "main");
+  assert.ok(capture.files.some((file) => file.path === "checkout.js" && file.stageState === "branch"));
+  assert.ok(!capture.files.some((file) => file.path === "token.js"));
   assert.ok(capture.stats.changeLines.production.total > 0);
   assert.ok(capture.stats.changeLines.test.total > 0);
   assert.ok(capture.files.find((file) => file.path === "checkout.js").snapshots.after.available);
+  assert.match(capture.files.find((file) => file.path === "checkout.js").snapshots.after.text, /return order\.id/);
   const ids = capture.files.flatMap((file) => file.hunks.map((hunk) => hunk.id));
   assert.equal(new Set(ids).size, ids.length);
-  assert.ok(
-    capture.files
-      .flatMap((file) => file.hunks)
-      .some((hunk) => hunk.secretFindings.some((finding) => finding.type === "generic-secret")),
+});
+
+test("capture requires an explicit target branch", () => {
+  const repo = fixtureRepo();
+  const capturePath = resolve(repo, "capture.json");
+  assert.throws(
+    () => run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT),
+    /Missing required --base <target-branch>/,
   );
 });
 
@@ -72,7 +81,9 @@ test("renderer preserves every hunk and falls back to Supporting changes", () =>
   const reportPath = resolve(repo, "report.html");
 
   writeFileSync(resolve(repo, "README.md"), "# Fixture\n\n<script>alert('nope')</script>\n");
-  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT);
+  run("git", ["add", "README.md"], repo);
+  run("git", ["commit", "-qm", "document fixture"], repo);
+  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--base", "main", "--output", capturePath], ROOT);
   writeFileSync(analysisPath, JSON.stringify({ schemaVersion: "wrong", groups: [] }));
   run(
     "node",
@@ -108,7 +119,9 @@ test("deterministic secret findings raise an annotated group to critical", () =>
   const reportPath = resolve(repo, "report.html");
 
   writeFileSync(resolve(repo, "secrets.env"), "API_KEY='hard-coded-secret-value'\n");
-  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT);
+  run("git", ["add", "secrets.env"], repo);
+  run("git", ["commit", "-qm", "add secret fixture"], repo);
+  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--base", "main", "--output", capturePath], ROOT);
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
   const hunkId = capture.files.flatMap((file) => file.hunks)[0].id;
   writeFileSync(
@@ -161,7 +174,9 @@ test("renderer allows repeated sliced excerpts across chronological story beats"
   const analysisPath = resolve(repo, "analysis.json");
   const reportPath = resolve(repo, "report.html");
   writeFileSync(resolve(repo, "checkout.js"), "export function submit(order) {\n  if (!order.id) throw new Error('missing id');\n  return String(order.id);\n}\n");
-  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT);
+  run("git", ["add", "checkout.js"], repo);
+  run("git", ["commit", "-qm", "validate and normalize checkout"], repo);
+  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--base", "main", "--output", capturePath], ROOT);
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
   const hunkId = capture.files.find((file) => file.path === "checkout.js").hunks[0].id;
   writeFileSync(analysisPath, JSON.stringify({

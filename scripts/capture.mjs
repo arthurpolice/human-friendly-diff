@@ -2,10 +2,10 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 
-const CAPTURE_SCHEMA = "human-friendly-diff.capture/v2";
+const CAPTURE_SCHEMA = "human-friendly-diff.capture/v3";
 const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
 function parseArgs(argv) {
@@ -38,10 +38,6 @@ function gitOptional(repo, args) {
   } catch {
     return "";
   }
-}
-
-function nulList(value) {
-  return new Set(value.split("\0").filter(Boolean));
 }
 
 function sha256(value) {
@@ -77,19 +73,19 @@ function boundedText(buffer) {
   return { available: true, text: buffer.toString("utf8"), bytes: buffer.length };
 }
 
-function captureSnapshots(repoRoot, file) {
+function captureSnapshots(repoRoot, file, base, head) {
   let before = { available: false, reason: file.status === "added" ? "added-file" : "unavailable" };
   let after = { available: false, reason: file.status === "deleted" ? "deleted-file" : "unavailable" };
   if (file.status !== "added") {
     try {
-      before = boundedText(Buffer.from(git(repoRoot, ["show", `HEAD:${file.oldPath}`], { encoding: null })));
+      before = boundedText(Buffer.from(git(repoRoot, ["show", `${base}:${file.oldPath}`], { encoding: null })));
     } catch {
       before = { available: false, reason: "unavailable" };
     }
   }
   if (file.status !== "deleted") {
     try {
-      after = boundedText(readFileSync(resolve(repoRoot, file.path)));
+      after = boundedText(Buffer.from(git(repoRoot, ["show", `${head}:${file.path}`], { encoding: null })));
     } catch {
       after = { available: false, reason: "unavailable" };
     }
@@ -125,7 +121,7 @@ function detectSecrets(lines) {
   return findings;
 }
 
-function parseDiff(rawDiff, state) {
+function parseDiff(rawDiff) {
   const files = [];
   const sections = rawDiff.split(/(?=^diff --git )/m).filter(Boolean);
 
@@ -219,22 +215,6 @@ function parseDiff(rawDiff, state) {
     }
 
     const path = newPath === "/dev/null" ? oldPath : newPath;
-    const absolutePath = resolve(state.repoRoot, path);
-    let size = null;
-    let objectType = "file";
-    let symlinkTarget = null;
-    try {
-      const stats = lstatSync(absolutePath);
-      size = stats.size;
-      if (stats.isSymbolicLink()) {
-        objectType = "symlink";
-        symlinkTarget = readlinkSync(absolutePath);
-      }
-    } catch {
-      // Deleted files have no working-tree metadata.
-    }
-
-    if (state.conflicted.has(path)) status = "conflicted";
     if (hunks.length === 0) {
       hunks.push({
         id: `${path}::0`,
@@ -248,18 +228,16 @@ function parseDiff(rawDiff, state) {
         metadataOnly: true,
       });
     }
-    const stageState = state.staged.has(path);
-    const worktreeState = state.unstaged.has(path);
     files.push({
       path,
       oldPath,
       newPath,
       status,
-      stageState: stageState && worktreeState ? "mixed" : stageState ? "staged" : "unstaged",
+      stageState: "branch",
       isBinary,
-      objectType,
-      symlinkTarget,
-      size,
+      objectType: newMode === "120000" || oldMode === "120000" ? "symlink" : "file",
+      symlinkTarget: null,
+      size: null,
       oldMode,
       newMode,
       metadata,
@@ -268,38 +246,6 @@ function parseDiff(rawDiff, state) {
     });
   }
   return files;
-}
-
-function quoteDiffPath(path) {
-  return path.includes(" ") ? `"${path.replaceAll('"', '\\"')}"` : path;
-}
-
-function untrackedSection(repoRoot, path) {
-  const absolutePath = resolve(repoRoot, path);
-  const stats = lstatSync(absolutePath);
-  const quoted = quoteDiffPath(path);
-  const header = [
-    `diff --git a/${quoted} b/${quoted}`,
-    `new file mode ${stats.isSymbolicLink() ? "120000" : "100644"}`,
-    "--- /dev/null",
-    `+++ b/${quoted}`,
-  ];
-
-  let buffer;
-  if (stats.isSymbolicLink()) buffer = Buffer.from(readlinkSync(absolutePath), "utf8");
-  else buffer = readFileSync(absolutePath);
-
-  if (buffer.includes(0)) {
-    return `${header.join("\n")}\nBinary files /dev/null and b/${quoted} differ\n`;
-  }
-
-  const text = buffer.toString("utf8");
-  const lines = text.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  header.push(`@@ -0,0 +1,${lines.length} @@`);
-  header.push(...lines.map((line) => `+${line}`));
-  if (text && !text.endsWith("\n")) header.push("\\ No newline at end of file");
-  return `${header.join("\n")}\n`;
 }
 
 function summarize(files) {
@@ -335,20 +281,21 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   const requestedRepo = resolve(String(args.repo || process.cwd()));
   const output = args.output ? resolve(String(args.output)) : null;
+  const baseRef = args.base ? String(args.base) : null;
   if (!output) throw new Error("Missing required --output <capture.json>");
+  if (!baseRef) throw new Error("Missing required --base <target-branch>");
 
   const repoRoot = realpathSync(git(requestedRepo, ["rev-parse", "--show-toplevel"]).trim());
   const insideWorkTree = git(repoRoot, ["rev-parse", "--is-inside-work-tree"]).trim();
   if (insideWorkTree !== "true") throw new Error("Not inside a Git working tree");
 
-  const staged = nulList(git(repoRoot, ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACDMRTUXB"]));
-  const unstaged = nulList(git(repoRoot, ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"]));
-  const conflicted = nulList(git(repoRoot, ["diff", "--name-only", "-z", "--diff-filter=U"]));
-  const untracked = [...nulList(git(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]))];
-
-  let rawDiff = git(repoRoot, [
+  const head = git(repoRoot, ["rev-parse", "HEAD"]).trim();
+  const base = git(repoRoot, ["rev-parse", "--verify", `${baseRef}^{commit}`]).trim();
+  const mergeBase = git(repoRoot, ["merge-base", base, head]).trim();
+  const rawDiff = git(repoRoot, [
     "diff",
-    "HEAD",
+    mergeBase,
+    head,
     "--no-ext-diff",
     "--no-textconv",
     "--find-renames",
@@ -358,23 +305,29 @@ function main() {
     "--dst-prefix=b/",
   ]);
 
-  for (const path of untracked) rawDiff += untrackedSection(repoRoot, path);
-
-  const state = { repoRoot, staged, unstaged, conflicted };
-  const files = parseDiff(rawDiff, state);
+  const files = parseDiff(rawDiff);
   for (const file of files) {
     file.changeKind = changeKind(file.path);
-    file.snapshots = captureSnapshots(repoRoot, file);
+    file.snapshots = captureSnapshots(repoRoot, file, mergeBase, head);
+    file.size = file.snapshots.after.bytes ?? file.snapshots.before.bytes ?? null;
   }
-  const head = gitOptional(repoRoot, ["rev-parse", "--short=12", "HEAD"]) || "unborn";
+  const shortHead = head.slice(0, 12);
+  const shortBase = base.slice(0, 12);
+  const shortMergeBase = mergeBase.slice(0, 12);
   const branch = gitOptional(repoRoot, ["branch", "--show-current"]) || `detached@${head}`;
   const repoName = basename(repoRoot);
-  const fingerprint = sha256(`${head}\0${rawDiff}`);
+  const fingerprint = sha256(`${base}\0${mergeBase}\0${head}\0${rawDiff}`);
 
   const capture = {
     schemaVersion: CAPTURE_SCHEMA,
     generatedAt: new Date().toISOString(),
-    repository: { name: repoName, branch, head, fingerprint },
+    repository: {
+      name: repoName,
+      branch,
+      head: shortHead,
+      target: { ref: baseRef, commit: shortBase, mergeBase: shortMergeBase },
+      fingerprint,
+    },
     clean: files.length === 0,
     stats: summarize(files),
     files,
@@ -384,7 +337,7 @@ function main() {
   process.stdout.write(
     capture.clean
       ? "Working tree is clean.\n"
-      : `Captured ${capture.stats.hunks} hunks across ${capture.stats.files} files: ${output}\n`,
+      : `Captured ${capture.stats.hunks} hunks across ${capture.stats.files} files from ${baseRef}...${branch}: ${output}\n`,
   );
 }
 

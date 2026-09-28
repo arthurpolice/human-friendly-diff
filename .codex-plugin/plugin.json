@@ -1,25 +1,33 @@
 {
   "name": "human-friendly-diff",
-  "version": "0.1.0",
-  "description": "Turn a working-tree diff into an intent-grouped local HTML review.",
+  "version": "0.1.0+codex.20260928011830",
+  "description": "Turn a branch comparison into a story-driven local HTML review.",
   "author": {
     "name": "Arthur Police",
     "url": "https://github.com/arthurpolice"
   },
   "license": "MIT",
-  "keywords": ["git", "diff", "code-review", "developer-tools"],
+  "keywords": [
+    "git",
+    "diff",
+    "code-review",
+    "developer-tools"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Human Friendly Diff",
-    "shortDescription": "Review working-tree changes grouped by intent.",
-    "longDescription": "Captures the exact Git working-tree diff, lets the active agent explain and group hunks by implementation intent, and renders a self-contained local HTML review.",
+    "shortDescription": "Review a branch against its PR target.",
+    "longDescription": "Captures the exact merge-base comparison between the current branch and a target branch, then renders a self-contained story-driven review presentation.",
     "developerName": "Arthur Police",
     "category": "Productivity",
-    "capabilities": ["Read", "Interactive"],
+    "capabilities": [
+      "Read",
+      "Interactive"
+    ],
     "brandColor": "#E7FF55",
     "defaultPrompt": [
-      "Generate a human-friendly diff for this working tree.",
-      "Group my current changes by implementation intent."
+      "Generate a human-friendly diff for this branch against main.",
+      "Turn this PR-style branch diff into a story-driven review."
     ]
   }
 }

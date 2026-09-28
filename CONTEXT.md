@@ -1,11 +1,11 @@
 # Human-Friendly Diff
 
-Human-Friendly Diff turns a Git working-tree snapshot into a presentation that follows the behavior changed in the system.
+Human-Friendly Diff turns a pull-request-style Git branch comparison into a presentation that follows the behavior changed in the system.
 
 ## Language
 
 **Change line**:
-An added or deleted line in the captured Git snapshot. Change lines are classified as production, test, or other.
+An added or deleted line in the captured merge-base-to-branch Git diff. Change lines are classified as production, test, or other.
 _Avoid_: LOC, code line
 
 **Functional module**:
