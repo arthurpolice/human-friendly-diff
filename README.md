@@ -4,7 +4,10 @@ Human-Friendly Diff is a local Codex plugin that turns a current-branch vs
 target-branch comparison into a story-driven slide presentation.
 
 It opens with production/test/other change-line totals and a functional module
-map, then walks through chronological system stories. The capture uses the
+map, then walks through chronological system stories. It discovers those
+stories first, delegates each story's code assembly, and independently validates
+coverage before rendering; code without enough evidence for a specific narrative
+is shown as an explicit unresolved finding, never a catch-all story. The capture uses the
 merge base of the target branch and current `HEAD`, matching a pull request;
 staged, unstaged, and untracked files are excluded. Each beat shows only the
 relevant exact diff excerpt, with bounded full-file before/after snapshots for
@@ -23,9 +26,11 @@ Invoke `@human-friendly-diff` or ask Codex to generate a human-friendly diff.
 The bundled skill performs:
 
 1. capture
-2. intent analysis
-3. deterministic render
-4. browser launch
+2. module and story discovery
+3. per-story assembly
+4. independent coverage validation
+5. deterministic render
+6. browser launch
 
 Reports are written to `/tmp/human-friendly-diff/`. The latest ten reports per
 repository are retained.

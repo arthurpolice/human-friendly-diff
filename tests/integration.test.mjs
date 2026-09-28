@@ -74,7 +74,7 @@ test("capture requires an explicit target branch", () => {
   );
 });
 
-test("renderer preserves every hunk and falls back to Supporting changes", () => {
+test("renderer preserves every hunk as an explicit unresolved finding", () => {
   const repo = fixtureRepo();
   const capturePath = resolve(repo, "capture.json");
   const analysisPath = resolve(repo, "analysis.json");
@@ -101,7 +101,10 @@ test("renderer preserves every hunk and falls back to Supporting changes", () =>
 
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
   const html = readFileSync(reportPath, "utf8");
-  assert.match(html, /Supporting changes/);
+  assert.match(html, /Intent not inferred/);
+  assert.match(html, /class="slide unresolved-slide"/);
+  assert.doesNotMatch(html, /Supporting changes/);
+  assert.doesNotMatch(html, /No user story/);
   assert.match(html, /class="slide overview-slide"/);
   assert.match(html, /Production vs tests/);
   assert.match(html, /id="next"/);
@@ -112,7 +115,7 @@ test("renderer preserves every hunk and falls back to Supporting changes", () =>
   }
 });
 
-test("deterministic secret findings raise an annotated group to critical", () => {
+test("deterministic secret findings raise an annotated story to critical", () => {
   const repo = fixtureRepo();
   const capturePath = resolve(repo, "capture.json");
   const analysisPath = resolve(repo, "analysis.json");
@@ -127,7 +130,7 @@ test("deterministic secret findings raise an annotated group to critical", () =>
   writeFileSync(
     analysisPath,
     JSON.stringify({
-      schemaVersion: "human-friendly-diff.analysis/v2",
+      schemaVersion: "human-friendly-diff.analysis/v3",
       overview: {
         modules: [{ id: "configuration", name: "Configuration module", hunkIds: [hunkId] }],
       },
@@ -180,7 +183,7 @@ test("renderer allows repeated sliced excerpts across chronological story beats"
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
   const hunkId = capture.files.find((file) => file.path === "checkout.js").hunks[0].id;
   writeFileSync(analysisPath, JSON.stringify({
-    schemaVersion: "human-friendly-diff.analysis/v2",
+    schemaVersion: "human-friendly-diff.analysis/v3",
     overview: { modules: [{ id: "checkout", name: "Checkout module", summary: "Submits orders.", hunkIds: [hunkId] }] },
     stories: [{
       id: "checkout",

@@ -1,6 +1,7 @@
 {
-  "schemaVersion": "human-friendly-diff.analysis/v2",
+  "schemaVersion": "human-friendly-diff.analysis/v3",
   "overview": { "modules": [] },
   "stories": [],
+  "unresolved": [],
   "verification": []
 }

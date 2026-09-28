@@ -26,3 +26,9 @@ _Avoid_: File, diff
 
 **Coverage**:
 The canonical accounting that ensures every captured hunk remains reachable from at least one story beat, independent of repeated presentation references.
+
+**Unresolved finding**:
+An explicit review finding for a captured hunk whose intent cannot be inferred
+confidently from the available evidence. It is not a system story or a generic
+catch-all category.
+_Avoid_: Supporting changes, no user story, miscellaneous

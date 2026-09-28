@@ -1,7 +1,7 @@
 {
   "name": "human-friendly-diff",
   "version": "0.1.0+codex.20260928015406",
-  "description": "Turn a branch comparison into a story-driven local HTML review.",
+  "description": "Turn a branch comparison into a validated story-driven local HTML review.",
   "author": {
     "name": "Arthur Police",
     "url": "https://github.com/arthurpolice"
@@ -17,7 +17,7 @@
   "interface": {
     "displayName": "Human Friendly Diff",
     "shortDescription": "Review a branch against its PR target.",
-    "longDescription": "Captures the exact merge-base comparison between the current branch and a target branch, then renders a self-contained story-driven review presentation.",
+    "longDescription": "Captures the exact merge-base comparison between the current branch and a target branch, discovers and validates concrete system stories, then renders a self-contained review presentation.",
     "developerName": "Arthur Police",
     "category": "Productivity",
     "capabilities": [

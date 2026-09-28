@@ -336,7 +336,7 @@ function main() {
   writeFileSync(output, `${JSON.stringify(capture, null, 2)}\n`, "utf8");
   process.stdout.write(
     capture.clean
-      ? "Working tree is clean.\n"
+      ? "No branch changes.\n"
       : `Captured ${capture.stats.hunks} hunks across ${capture.stats.files} files from ${baseRef}...${branch}: ${output}\n`,
   );
 }
