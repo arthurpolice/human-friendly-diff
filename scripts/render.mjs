@@ -4,9 +4,8 @@ import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, resolve } from "node:path";
 
-const ANALYSIS_SCHEMA = "human-friendly-diff.analysis/v1";
+const ANALYSIS_SCHEMA = "human-friendly-diff.analysis/v2";
 const MAX_REPORT_BYTES = 25 * 1024 * 1024;
-const ATTENTION_ORDER = { critical: 0, "review-carefully": 1, routine: 2 };
 
 function parseArgs(argv) {
   const result = {};
@@ -52,101 +51,124 @@ function formatBytes(value) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function isGenerated(path) {
-  return (
-    /(^|\/)(dist|build|coverage|vendor)\//.test(path) ||
-    /(?:^|\/)(?:package-lock|pnpm-lock|yarn\.lock|Cargo\.lock|composer\.lock)$/.test(path) ||
-    /\.(?:min\.(?:js|css)|snap|map)$/.test(path)
-  );
-}
-
 function normalizeAnalysis(capture, input) {
   const hunkMap = new Map();
   for (const file of capture.files) {
     for (const hunk of file.hunks) hunkMap.set(hunk.id, { file, hunk });
   }
-
-  const assigned = new Set();
-  const rawGroups = Array.isArray(input?.groups) ? input.groups : [];
-  const groups = [];
-
-  for (const [index, raw] of rawGroups.entries()) {
+  const validIds = (values) => [...new Set((Array.isArray(values) ? values : []).map(String).filter((id) => hunkMap.has(id)))];
+  const primaryModules = new Set();
+  const modules = [];
+  for (const [index, raw] of (Array.isArray(input?.overview?.modules) ? input.overview.modules : []).entries()) {
     if (!raw || typeof raw !== "object") continue;
-    const hunkIds = [];
-    for (const id of Array.isArray(raw.hunkIds) ? raw.hunkIds : []) {
-      if (hunkMap.has(id) && !assigned.has(id)) {
-        hunkIds.push(id);
-        assigned.add(id);
-      }
-    }
-    if (hunkIds.length === 0) continue;
+    const hunkIds = validIds(raw.hunkIds).filter((id) => !primaryModules.has(id));
+    hunkIds.forEach((id) => primaryModules.add(id));
+    modules.push({
+      id: slug(raw.id || raw.name || `module-${index + 1}`) || `module-${index + 1}`,
+      name: String(raw.name || `Module ${index + 1}`),
+      summary: String(raw.summary || "No module summary was supplied."),
+      hunkIds,
+      secondaryHunkIds: validIds(raw.secondaryHunkIds),
+    });
+  }
+  const moduleRemainder = [...hunkMap.keys()].filter((id) => !primaryModules.has(id));
+  if (moduleRemainder.length || modules.length === 0) {
+    modules.push({
+      id: "supporting",
+      name: modules.length ? "Supporting changes" : "Unclassified module",
+      summary: "Changes without a confident functional-module assignment.",
+      hunkIds: moduleRemainder.length ? moduleRemainder : [...hunkMap.keys()],
+      secondaryHunkIds: [],
+    });
+  }
 
-    let attention = ["routine", "review-carefully", "critical"].includes(raw.attention)
-      ? raw.attention
-      : "review-carefully";
+  const referenced = new Set();
+  const stories = [];
+  for (const [storyIndex, raw] of (Array.isArray(input?.stories) ? input.stories : []).entries()) {
+    if (!raw || typeof raw !== "object") continue;
+    const steps = [];
+    for (const [stepIndex, step] of (Array.isArray(raw.steps) ? raw.steps : []).entries()) {
+      if (!step || typeof step !== "object") continue;
+      const excerpts = [];
+      for (const excerpt of Array.isArray(step.excerpts) ? step.excerpts : []) {
+        const hunkId = String(excerpt?.hunkId || "");
+        if (!hunkMap.has(hunkId)) continue;
+        const lineCount = hunkMap.get(hunkId).hunk.lines.length;
+        const lineStart = Math.max(1, Math.min(lineCount || 1, Number(excerpt.lineStart) || 1));
+        const lineEnd = Math.max(lineStart, Math.min(lineCount || lineStart, Number(excerpt.lineEnd) || lineCount || lineStart));
+        excerpts.push({ hunkId, lineStart, lineEnd, explanation: String(excerpt.explanation || "") });
+        referenced.add(hunkId);
+      }
+      if (excerpts.length === 0) continue;
+      steps.push({
+        id: slug(step.id || `beat-${stepIndex + 1}`) || `beat-${stepIndex + 1}`,
+        actor: String(step.actor || "System"),
+        action: String(step.action || "Applies the captured change"),
+        outcome: String(step.outcome || "The next behavior becomes possible."),
+        moduleId: slug(step.moduleId || "supporting") || "supporting",
+        excerpts,
+      });
+    }
+    if (steps.length === 0) continue;
+    const storyHunks = new Set(steps.flatMap((step) => step.excerpts.map((excerpt) => excerpt.hunkId)));
+    let attention = ["routine", "review-carefully", "critical"].includes(raw.attention) ? raw.attention : "routine";
     const confidence = ["high", "medium", "low"].includes(raw.confidence) ? raw.confidence : "medium";
-    const severe = hunkIds.some((id) => {
+    const severe = [...storyHunks].some((id) => {
       const { file, hunk } = hunkMap.get(id);
       return file.status === "conflicted" || hunk.secretFindings.length > 0;
     });
     if (severe) attention = "critical";
     else if (confidence === "low" && attention === "routine") attention = "review-carefully";
-
-    groups.push({
-      id: slug(raw.id || raw.title || `group-${index + 1}`) || `group-${index + 1}`,
-      title: String(raw.title || `Change group ${index + 1}`),
-      summary: String(raw.summary || "AI analysis did not provide a group summary."),
+    stories.push({
+      id: slug(raw.id || raw.title || `story-${storyIndex + 1}`) || `story-${storyIndex + 1}`,
+      title: String(raw.title || `System story ${storyIndex + 1}`),
+      goal: String(raw.goal || "Explain how this change moves through the system."),
+      summary: String(raw.summary || ""),
       attention,
       attentionReason: String(raw.attentionReason || (severe ? "Deterministic checks found a critical review signal." : "")),
       confidence,
-      hunkIds,
-      crossReferences: Array.isArray(raw.crossReferences) ? raw.crossReferences.map(String) : [],
-      reviewAfter: Array.isArray(raw.reviewAfter) ? raw.reviewAfter.map(String) : [],
       risks: Array.isArray(raw.risks) ? raw.risks.map(String) : [],
       questions: Array.isArray(raw.questions) ? raw.questions.map(String) : [],
-      hunkExplanations: raw.hunkExplanations && typeof raw.hunkExplanations === "object" ? raw.hunkExplanations : {},
+      steps,
     });
   }
 
-  const unassigned = [...hunkMap.keys()].filter((id) => !assigned.has(id));
-  if (unassigned.length > 0) {
-    groups.push({
-      id: "needs-classification",
-      title: "Needs classification",
-      summary: "These hunks were not confidently assigned by the AI analysis.",
-      attention: unassigned.some((id) => {
+  const uncovered = [...hunkMap.keys()].filter((id) => !referenced.has(id));
+  if (uncovered.length) {
+    stories.push({
+      id: "supporting-changes",
+      title: "Supporting changes",
+      goal: "Keep every captured change reachable for review.",
+      summary: "These hunks were not assigned to a semantic system story.",
+      attention: uncovered.some((id) => {
         const { file, hunk } = hunkMap.get(id);
         return file.status === "conflicted" || hunk.secretFindings.length > 0;
-      })
-        ? "critical"
-        : "review-carefully",
-      attentionReason: "Grouping is incomplete or ambiguous.",
+      }) ? "critical" : "review-carefully",
+      attentionReason: "Story coverage was incomplete or ambiguous.",
       confidence: "low",
-      hunkIds: unassigned,
-      crossReferences: [],
-      reviewAfter: [],
       risks: [],
-      questions: ["What implementation purpose connects these changes?"],
-      hunkExplanations: {},
+      questions: ["Which system story should own these changes?"],
+      steps: uncovered.map((hunkId, index) => ({
+        id: `unclassified-${index + 1}`,
+        actor: "Supporting code",
+        action: "Changes outside the inferred narrative",
+        outcome: "The complete Git snapshot remains reviewable.",
+        moduleId: modules.find((module) => module.hunkIds.includes(hunkId))?.id || "supporting",
+        excerpts: [{ hunkId, lineStart: 1, lineEnd: hunkMap.get(hunkId).hunk.lines.length || 1, explanation: "Unclassified captured hunk." }],
+      })),
     });
   }
 
-  groups.sort((a, b) => ATTENTION_ORDER[a.attention] - ATTENTION_ORDER[b.attention]);
   return {
     schemaVersion: ANALYSIS_SCHEMA,
     sourceSchemaVersion: input?.schemaVersion || null,
-    reviewPath: {
-      summary: String(input?.reviewPath?.summary || "Review higher-attention groups first, then follow dependency links."),
-      checks: Array.isArray(input?.reviewPath?.checks) ? input.reviewPath.checks.map(String) : [],
-    },
-    verification: Array.isArray(input?.verification)
-      ? input.verification.map((item) => ({
-          command: String(item?.command || "Unknown command"),
-          status: ["passed", "failed", "not-run"].includes(item?.status) ? item.status : "not-run",
-          note: String(item?.note || ""),
-        }))
-      : [],
-    groups,
+    overview: { modules },
+    verification: Array.isArray(input?.verification) ? input.verification.map((item) => ({
+      command: String(item?.command || "Unknown command"),
+      status: ["passed", "failed", "not-run"].includes(item?.status) ? item.status : "not-run",
+      note: String(item?.note || ""),
+    })) : [],
+    stories,
   };
 }
 
@@ -178,17 +200,6 @@ function highlightCode(text, path) {
     cursor = match.index + token.length;
   }
   return output + escapeHtml(text.slice(cursor));
-}
-
-function compactFlags(lines, forceCompact) {
-  if (!forceCompact) return lines.map(() => false);
-  const changed = lines
-    .map((line, index) => (line.kind === "add" || line.kind === "delete" ? index : -1))
-    .filter((index) => index >= 0);
-  return lines.map((line, index) => {
-    if (line.kind !== "context") return false;
-    return !changed.some((changedIndex) => Math.abs(changedIndex - index) <= 3);
-  });
 }
 
 function lineRow(line, path, extra) {
@@ -250,196 +261,72 @@ function sideRows(lines, path, extraFlags) {
   return rows.join("");
 }
 
-function hunkMarkup(file, hunk, explanation, forceCompact) {
-  const contextFlags = compactFlags(hunk.lines, true);
-  const omittedContext = forceCompact && contextFlags.some(Boolean);
-  const displayLines = forceCompact
-    ? hunk.lines.filter((_, index) => !contextFlags[index])
-    : hunk.lines;
-  const flags = forceCompact
-    ? displayLines.map(() => false)
-    : contextFlags;
-  const hasExtra = flags.some(Boolean);
-  const secretMarkup = hunk.secretFindings.length
+function excerptMarkup(entry, excerpt, instance, forceCompact) {
+  const { file, hunk } = entry;
+  const selected = hunk.lines.slice(excerpt.lineStart - 1, excerpt.lineEnd);
+  const lines = selected.length ? selected : hunk.lines;
+  const flags = lines.map(() => false);
+  const snapshot = file.snapshots || {};
+  const snapshots = forceCompact ? "" : [
+    snapshot.before?.available ? `<section><h5>Before · HEAD</h5><pre>${escapeHtml(snapshot.before.text)}</pre></section>` : "",
+    snapshot.after?.available ? `<section><h5>After · working tree</h5><pre>${escapeHtml(snapshot.after.text)}</pre></section>` : "",
+  ].filter(Boolean).join("");
+  const contextReason = snapshots ? "" : `<p class="context-note">${forceCompact ? "Full-file context omitted to keep this report below 25 MB." : `Full-file context unavailable (${escapeHtml(snapshot.after?.reason || snapshot.before?.reason || "not captured")}).`}</p>`;
+  const secret = hunk.secretFindings.length
     ? `<div class="signal critical-signal">Potential secret pattern detected on added line${hunk.secretFindings.length === 1 ? "" : "s"} ${hunk.secretFindings.map((finding) => finding.newLine).join(", ")}.</div>`
     : "";
-  return `<article class="hunk" id="${escapeHtml(slug(hunk.id))}" data-search="${escapeHtml(`${file.path} ${explanation || ""} ${hunk.lines.map((line) => line.text).join(" ")}`)}">
-    <header class="hunk-head">
-      <div>
-        <a class="path" href="#${escapeHtml(slug(hunk.id))}">${escapeHtml(file.oldPath !== file.newPath ? `${file.oldPath} → ${file.newPath}` : file.path)}</a>
-        <span class="state">${escapeHtml(file.stageState)}</span>
-        ${isGenerated(file.path) ? '<span class="state generated">generated / lockfile</span>' : ""}
-      </div>
-      <button class="copy-link" data-anchor="${escapeHtml(slug(hunk.id))}" title="Copy link">#</button>
-    </header>
-    <p class="hunk-explanation"><span>AI analysis</span>${escapeHtml(explanation || "No hunk explanation was provided.")}</p>
-    ${secretMarkup}
-    ${file.status === "conflicted" ? '<div class="signal critical-signal">Unresolved merge conflict.</div>' : ""}
-    ${file.isBinary ? `<div class="binary">Binary change · ${escapeHtml(file.status)} · ${escapeHtml(formatBytes(file.size))}</div>` : hunk.metadataOnly ? `
-      <div class="binary">Metadata-only change · ${escapeHtml(hunk.header)}</div>
-    ` : `
-      <div class="hunk-label">${escapeHtml(hunk.header)}</div>
-      ${omittedContext ? '<div class="signal">Extended unchanged context omitted to keep the report below 25 MB.</div>' : ""}
-      <div class="diff unified-view">
-        <table><tbody>${displayLines.map((line, index) => lineRow(line, file.path, flags[index])).join("")}</tbody></table>
-      </div>
-      <div class="diff side-view" hidden>
-        <table><tbody>${sideRows(displayLines, file.path, flags)}</tbody></table>
-      </div>
-      ${hasExtra ? '<button class="expand-context">Show embedded context</button>' : ""}
-    `}
+  return `<article class="excerpt" id="excerpt-${escapeHtml(instance)}" data-hunk-anchor="${escapeHtml(slug(hunk.id))}">
+    <header class="excerpt-head"><div><a href="#excerpt-${escapeHtml(instance)}">${escapeHtml(file.oldPath !== file.newPath ? `${file.oldPath} → ${file.newPath}` : file.path)}</a><span>${escapeHtml(file.stageState)}</span><span>${escapeHtml(file.changeKind || "other")}</span></div><small>lines ${excerpt.lineStart}–${excerpt.lineEnd} of hunk</small></header>
+    <p class="excerpt-why"><b>Why here</b>${escapeHtml(excerpt.explanation || "This excerpt supports the current story beat.")}</p>
+    ${secret}${file.status === "conflicted" ? '<div class="signal critical-signal">Unresolved merge conflict.</div>' : ""}
+    ${file.isBinary || hunk.metadataOnly ? `<div class="binary">${escapeHtml(hunk.header)}</div>` : `<div class="hunk-label">${escapeHtml(hunk.header)}</div><div class="diff unified-view"><table><tbody>${lines.map((line) => lineRow(line, file.path, false)).join("")}</tbody></table></div><div class="diff side-view" hidden><table><tbody>${sideRows(lines, file.path, flags)}</tbody></table></div>`}
+    ${snapshots ? `<details class="file-context"><summary>Expand full file context</summary><div class="snapshot-grid">${snapshots}</div></details>` : contextReason}
   </article>`;
-}
-
-function groupMarkup(group, hunkMap, forceCompact) {
-  const entries = group.hunkIds.map((id) => hunkMap.get(id)).filter(Boolean);
-  const stats = { files: new Set(), hunks: entries.length, additions: 0, deletions: 0 };
-  for (const { file, hunk } of entries) {
-    stats.files.add(file.path);
-    for (const line of hunk.lines) {
-      if (line.kind === "add") stats.additions += 1;
-      if (line.kind === "delete") stats.deletions += 1;
-    }
-  }
-  const lists = [
-    group.risks.length ? `<section class="notes"><h4>Review attention</h4><ul>${group.risks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : "",
-    group.questions.length ? `<section class="notes"><h4>Questions</h4><ul>${group.questions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>` : "",
-  ].join("");
-  const dependencies = group.reviewAfter.length
-    ? `<p class="dependencies">Review after: ${group.reviewAfter.map((id) => `<a href="#group-${escapeHtml(slug(id))}">${escapeHtml(id)}</a>`).join(", ")}</p>`
-    : "";
-
-  return `<section class="intent-group" id="group-${escapeHtml(group.id)}" data-group="${escapeHtml(group.id)}" data-search="${escapeHtml(`${group.title} ${group.summary} ${group.risks.join(" ")} ${group.questions.join(" ")}`)}">
-    <header class="group-head">
-      <div class="group-title-row">
-        <span class="attention ${group.attention}">${group.attention === "review-carefully" ? "Review carefully" : group.attention}</span>
-        <span class="confidence">AI confidence: ${escapeHtml(group.confidence)}</span>
-        <button class="copy-link" data-anchor="group-${escapeHtml(group.id)}" title="Copy link">#</button>
-      </div>
-      <h2>${escapeHtml(group.title)}</h2>
-      <p>${escapeHtml(group.summary)}</p>
-      ${group.attentionReason ? `<p class="attention-reason">${escapeHtml(group.attentionReason)}</p>` : ""}
-      <div class="group-stats"><span>${stats.files.size} files</span><span>${stats.hunks} hunks</span><span class="plus">+${stats.additions}</span><span class="minus">−${stats.deletions}</span></div>
-      ${dependencies}
-    </header>
-    ${lists}
-    <div class="hunks">${entries.map(({ file, hunk }) => hunkMarkup(file, hunk, group.hunkExplanations[hunk.id], forceCompact)).join("")}</div>
-  </section>`;
 }
 
 function buildHtml(capture, analysis, forceCompact = false) {
   const hunkMap = new Map();
-  for (const file of capture.files) {
-    for (const hunk of file.hunks) hunkMap.set(hunk.id, { file, hunk });
-  }
-  const title = `Human-Friendly Diff — ${capture.repository.name} — ${capture.repository.branch}`;
+  for (const file of capture.files) for (const hunk of file.hunks) hunkMap.set(hunk.id, { file, hunk });
+  const lineStats = capture.stats.changeLines || {
+    production: { total: capture.stats.additions + capture.stats.deletions },
+    test: { total: 0 },
+    other: { total: 0 },
+  };
+  const moduleCards = analysis.overview.modules.map((module) => {
+    const ids = [...new Set([...module.hunkIds, ...module.secondaryHunkIds])];
+    const files = new Set(ids.map((id) => hunkMap.get(id)?.file.path).filter(Boolean));
+    const lines = ids.reduce((total, id) => total + (hunkMap.get(id)?.hunk.lines.filter((line) => line.kind === "add" || line.kind === "delete").length || 0), 0);
+    return `<article class="module-card"><span>${files.size} files · ${lines} changed lines</span><h3>${escapeHtml(module.name)}</h3><p>${escapeHtml(module.summary)}</p></article>`;
+  }).join("");
   const verification = analysis.verification.length
     ? analysis.verification.map((item) => `<li><span class="verify ${item.status}">${escapeHtml(item.status)}</span><code>${escapeHtml(item.command)}</code>${item.note ? ` — ${escapeHtml(item.note)}` : ""}</li>`).join("")
-    : '<li><span class="verify not-run">not reported</span> No verification results were supplied by the active agent.</li>';
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>${escapeHtml(title)}</title>
-  <style>
-    :root{color-scheme:dark;--ink:#eef2dc;--muted:#8d9787;--bg:#0a0c0b;--panel:#111510;--panel2:#171c15;--line:#30372d;--acid:#e7ff55;--cyan:#6ee7e0;--red:#ff6b68;--orange:#ffad54;--green:#79dc83;--add:#102a19;--del:#321716;--shadow:0 20px 50px rgba(0,0,0,.32)}
-    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 82% 0,#182117 0,transparent 31rem),var(--bg);color:var(--ink);font-family:"IBM Plex Sans","Avenir Next","Segoe UI",sans-serif;font-size:15px;line-height:1.5}
-    button,input{font:inherit}button{color:inherit}.app{display:grid;grid-template-columns:290px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:24px 18px;border-right:1px solid var(--line);background:rgba(10,12,11,.92);backdrop-filter:blur(18px);overflow:auto}.brand{display:flex;align-items:center;gap:10px;margin-bottom:24px;font-family:"Arial Narrow","Roboto Condensed",sans-serif;font-size:12px;font-weight:800;letter-spacing:.18em;text-transform:uppercase}.brand-mark{width:20px;height:20px;background:var(--acid);clip-path:polygon(0 0,100% 0,67% 100%,0 100%)}.search{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:6px;background:#080a09;color:var(--ink);outline:none}.search:focus{border-color:var(--acid);box-shadow:0 0 0 3px #e7ff5522}.sidebar h3{margin:22px 0 9px;color:var(--muted);font-size:11px;letter-spacing:.14em;text-transform:uppercase}.group-nav{display:grid;gap:5px}.nav-item{display:grid;grid-template-columns:18px 1fr;gap:9px;align-items:start;padding:9px 8px;border-radius:6px;color:var(--ink);text-decoration:none}.nav-item:hover{background:var(--panel2)}.nav-item input{margin-top:3px;accent-color:var(--acid)}.nav-copy{min-width:0}.nav-title{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:13px}.nav-attention{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.sidebar-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.small-btn,.view-toggle button,.copy-link,.expand-context{border:1px solid var(--line);border-radius:5px;background:var(--panel);cursor:pointer}.small-btn{padding:8px;font-size:12px}.small-btn:hover,.view-toggle button:hover,.copy-link:hover,.expand-context:hover{border-color:var(--acid)}
-    main{min-width:0;padding:42px clamp(20px,4vw,68px) 100px}.hero{position:relative;max-width:1280px;margin:0 auto 28px;padding:30px;border:1px solid var(--line);background:linear-gradient(135deg,#151b13,#0d100e 65%);box-shadow:var(--shadow);overflow:hidden}.hero:after{content:"";position:absolute;right:-50px;top:-90px;width:250px;height:250px;border:54px solid #e7ff5511;transform:rotate(18deg)}.eyebrow{color:var(--acid);font-size:11px;font-weight:800;letter-spacing:.17em;text-transform:uppercase}.hero h1{max-width:900px;margin:8px 0 3px;font-family:"Arial Narrow","Roboto Condensed",sans-serif;font-size:clamp(32px,5vw,64px);line-height:.98;letter-spacing:-.035em}.meta{display:flex;flex-wrap:wrap;gap:7px 18px;color:var(--muted);font-family:"SFMono-Regular",Consolas,monospace;font-size:12px}.stats{display:flex;flex-wrap:wrap;gap:14px;margin-top:22px}.stat{min-width:100px;padding:13px 15px;border-left:2px solid var(--acid);background:#090b09}.stat strong{display:block;font-size:22px}.stat span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.1em}.toolbar{position:sticky;top:12px;z-index:10;display:flex;justify-content:space-between;align-items:center;gap:12px;max-width:1280px;margin:0 auto 18px;padding:8px;border:1px solid var(--line);border-radius:8px;background:#0c0f0de8;backdrop-filter:blur(14px)}.view-toggle{display:flex}.view-toggle button{padding:7px 12px;border-radius:4px}.view-toggle button.active{background:var(--acid);color:#0a0c0b;border-color:var(--acid);font-weight:800}.review-path,.verification{max-width:1280px;margin:0 auto 18px;padding:18px 20px;border:1px solid var(--line);background:var(--panel)}.review-path h2,.verification h2{margin:0 0 7px;font-size:15px}.review-path p{margin:0;color:var(--muted)}.review-path ul,.verification ul{margin:9px 0 0;padding-left:20px}.verify{display:inline-block;margin-right:8px;padding:2px 6px;border-radius:3px;font-size:10px;font-weight:800;text-transform:uppercase}.verify.passed{background:#173c20;color:var(--green)}.verify.failed{background:#481b19;color:var(--red)}.verify.not-run{background:#302c1a;color:var(--orange)}
-    .groups{display:grid;gap:24px;max-width:1280px;margin:0 auto}.intent-group{scroll-margin-top:82px;border:1px solid var(--line);background:var(--panel);box-shadow:var(--shadow)}.group-head{padding:24px 26px;border-bottom:1px solid var(--line);background:linear-gradient(120deg,#171c15,#101310)}.group-title-row{display:flex;align-items:center;gap:10px}.attention{display:inline-flex;padding:4px 8px;border:1px solid;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.attention.routine{color:var(--green);border-color:#79dc8366;background:#79dc8312}.attention.review-carefully{color:var(--orange);border-color:#ffad5466;background:#ffad5412}.attention.critical{color:var(--red);border-color:#ff6b6866;background:#ff6b6812}.confidence{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em}.copy-link{margin-left:auto;width:28px;height:28px;color:var(--muted)}.group-head h2{margin:13px 0 5px;font-family:"Arial Narrow","Roboto Condensed",sans-serif;font-size:30px;line-height:1.05}.group-head>p{max-width:900px;margin:6px 0;color:#c3cabd}.attention-reason{font-size:12px!important;color:var(--muted)!important}.group-stats{display:flex;gap:13px;margin-top:13px;font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;color:var(--muted)}.plus{color:var(--green)}.minus{color:var(--red)}.dependencies{font-size:12px}.dependencies a{color:var(--cyan)}.notes{margin:16px 26px;padding:12px 15px;border-left:2px solid var(--orange);background:#16150f}.notes h4{margin:0 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.1em}.notes ul{margin:0;padding-left:20px;color:#c3cabd}.hunks{display:grid;gap:1px;background:var(--line)}.hunk{min-width:0;background:#0d100e;scroll-margin-top:82px}.hunk-head{display:flex;justify-content:space-between;align-items:center;padding:10px 13px;background:#151a14}.path{color:var(--cyan);font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;text-decoration:none}.state{margin-left:7px;padding:2px 5px;border:1px solid var(--line);border-radius:3px;color:var(--muted);font-size:9px;text-transform:uppercase}.state.generated{color:var(--orange)}.hunk-explanation{display:flex;gap:10px;margin:0;padding:10px 13px;border-top:1px solid #20251e;color:#c7cec1;font-size:13px}.hunk-explanation span{flex:none;color:var(--acid);font-size:9px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}.hunk-label{padding:6px 12px;background:#121812;color:#839779;font-family:"SFMono-Regular",Consolas,monospace;font-size:11px}.diff{overflow:auto}.diff table{width:100%;border-collapse:collapse;font-family:"SFMono-Regular",Consolas,monospace;font-size:12px;line-height:1.45}.diff td{padding:0;vertical-align:top}.ln{width:48px;min-width:48px;padding:0 8px!important;background:#101310;color:#596154;text-align:right;user-select:none;border-right:1px solid #242a22}.marker{width:24px;min-width:24px;text-align:center;user-select:none}.code{width:auto;white-space:pre;padding:0 10px!important}.diff-line.add,.side-line .add{background:var(--add)}.diff-line.delete,.side-line .delete{background:var(--del)}.diff-line.add .marker{color:var(--green)}.diff-line.delete .marker{color:var(--red)}.side-view .code{width:50%;max-width:0;overflow:hidden}.side-view td:nth-child(2){border-right:1px solid var(--line)}.extra-context{display:none}.hunk.context-open .extra-context{display:table-row}.expand-context{margin:9px 12px;padding:6px 9px;color:var(--muted);font-size:11px}.binary,.signal{padding:18px}.critical-signal{color:#ffd3d1;background:#391817;border-left:3px solid var(--red)}.tok-comment{color:#6d7d67}.tok-string{color:#c7db8d}.tok-number,.tok-literal{color:#e7a96b}.tok-keyword{color:#76cfe0}.empty-search{display:none;max-width:1280px;margin:30px auto;color:var(--muted);text-align:center}.footer{max-width:1280px;margin:30px auto 0;color:var(--muted);font-size:11px;text-align:center}
-    :focus-visible{outline:2px solid var(--acid);outline-offset:2px}@media(max-width:900px){.app{display:block}.sidebar{position:relative;width:100%;height:auto;border-right:0;border-bottom:1px solid var(--line)}.group-nav{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}main{padding-top:24px}.toolbar{top:6px}}@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-  </style>
-</head>
-<body>
-<div class="app">
-  <aside class="sidebar">
-    <div class="brand"><span class="brand-mark"></span>Human-Friendly Diff</div>
-    <input id="search" class="search" type="search" placeholder="Search changes…" aria-label="Search report">
-    <h3>Review groups</h3>
-    <nav class="group-nav">${analysis.groups.map((group) => `<a class="nav-item" href="#group-${escapeHtml(group.id)}" data-nav-group="${escapeHtml(group.id)}"><input type="checkbox" aria-label="Mark ${escapeHtml(group.title)} reviewed"><span class="nav-copy"><span class="nav-title">${escapeHtml(group.title)}</span><span class="nav-attention">${escapeHtml(group.attention)}</span></span></a>`).join("")}</nav>
-    <h3>Report</h3>
-    <div class="sidebar-actions"><button class="small-btn" id="download-analysis">Analysis JSON</button><button class="small-btn" id="collapse-all">Collapse groups</button></div>
-  </aside>
-  <main>
-    <header class="hero">
-      <div class="eyebrow">Working tree snapshot</div>
-      <h1>${escapeHtml(capture.repository.name)}<br><span style="color:var(--muted)">${escapeHtml(capture.repository.branch)}</span></h1>
-      <div class="meta"><span>HEAD ${escapeHtml(capture.repository.head)}</span><span>${escapeHtml(capture.generatedAt)}</span><span>snapshot ${escapeHtml(capture.repository.fingerprint.slice(0, 12))}</span></div>
-      <div class="stats"><div class="stat"><strong>${capture.stats.files}</strong><span>files</span></div><div class="stat"><strong>${capture.stats.hunks}</strong><span>hunks</span></div><div class="stat"><strong class="plus">+${capture.stats.additions}</strong><span>additions</span></div><div class="stat"><strong class="minus">−${capture.stats.deletions}</strong><span>deletions</span></div></div>
-    </header>
-    <div class="toolbar"><div class="view-toggle"><button class="active" data-view="unified">Unified</button><button data-view="side">Side by side</button></div><span class="meta">Grouped by inferred purpose · exact Git snapshot</span></div>
-    <section class="review-path"><h2>Suggested review path <span class="confidence">AI analysis</span></h2><p>${escapeHtml(analysis.reviewPath.summary)}</p>${analysis.reviewPath.checks.length ? `<ul>${analysis.reviewPath.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}</section>
-    <section class="verification"><h2>Verification observed</h2><ul>${verification}</ul></section>
-    <div class="empty-search" id="empty-search">No intent groups match this search.</div>
-    <div class="groups">${analysis.groups.map((group) => groupMarkup(group, hunkMap, forceCompact)).join("")}</div>
-    <div class="footer">Generated locally by Human-Friendly Diff · ${escapeHtml(capture.repository.fingerprint)}</div>
-  </main>
-</div>
-<script id="analysis-data" type="application/json">${safeJson(analysis)}</script>
-<script>
-  const fingerprint = ${safeJson(capture.repository.fingerprint)};
-  const storageKey = "hfd:" + fingerprint;
-  const state = JSON.parse(sessionStorage.getItem(storageKey) || "{}");
-  document.querySelectorAll("[data-nav-group]").forEach((link) => {
-    const id = link.dataset.navGroup;
-    const checkbox = link.querySelector("input");
-    checkbox.checked = Boolean(state[id]);
-    checkbox.addEventListener("click", (event) => {
-      event.stopPropagation();
-      state[id] = checkbox.checked;
-      sessionStorage.setItem(storageKey, JSON.stringify(state));
+    : '<li><span class="verify not-run">not reported</span>No verification results were supplied.</li>';
+  const slides = [];
+  slides.push(`<section class="slide overview-slide" id="overview" data-title="Change overview"><div class="slide-inner"><header class="deck-title"><div class="eyebrow">Working tree presentation</div><h1>${escapeHtml(capture.repository.name)}<br><span>${escapeHtml(capture.repository.branch)}</span></h1><p>HEAD ${escapeHtml(capture.repository.head)} · snapshot ${escapeHtml(capture.repository.fingerprint.slice(0, 12))}</p></header><div class="overview-grid"><section class="loc-panel"><div class="section-label">Change-line composition</div><h2>Production vs tests</h2><div class="loc-bars"><div class="loc-row production"><strong>${lineStats.production.total}</strong><span>Production</span><i style="--size:${lineStats.production.total}"></i></div><div class="loc-row test"><strong>${lineStats.test.total}</strong><span>Tests</span><i style="--size:${lineStats.test.total}"></i></div><div class="loc-row other"><strong>${lineStats.other.total}</strong><span>Other</span><i style="--size:${lineStats.other.total}"></i></div></div><p class="fine-print">Additions + deletions · deterministic path classification</p></section><section class="module-panel"><div class="section-label">Functional map</div><h2>Modules touched</h2><div class="module-list">${moduleCards}</div></section></div></div></section>`);
+  let excerptIndex = 0;
+  analysis.stories.forEach((story, storyIndex) => {
+    story.steps.forEach((step, stepIndex) => {
+      const timeline = story.steps.map((item, index) => `<a class="timeline-beat${index === stepIndex ? " active" : ""}" href="#story-${escapeHtml(story.id)}-${index + 1}" title="${escapeHtml(item.action)}"><b>${index + 1}</b><span>${escapeHtml(item.actor)}</span></a>`).join("");
+      const excerpts = step.excerpts.map((excerpt) => {
+        excerptIndex += 1;
+        return excerptMarkup(hunkMap.get(excerpt.hunkId), excerpt, `${story.id}-${step.id}-${excerptIndex}`, forceCompact);
+      }).join("");
+      const notes = stepIndex === 0 && (story.risks.length || story.questions.length) ? `<aside class="story-notes">${story.risks.length ? `<div><b>Review attention</b>${story.risks.map((risk) => `<p>${escapeHtml(risk)}</p>`).join("")}</div>` : ""}${story.questions.length ? `<div><b>Questions</b>${story.questions.map((question) => `<p>${escapeHtml(question)}</p>`).join("")}</div>` : ""}</aside>` : "";
+      slides.push(`<section class="slide story-slide" id="story-${escapeHtml(story.id)}-${stepIndex + 1}" data-title="${escapeHtml(story.title)} · ${stepIndex + 1}/${story.steps.length}"><div class="slide-inner"><header class="story-head"><div class="story-meta"><span>Story ${storyIndex + 1}</span><span class="attention ${story.attention}">${story.attention}</span><span>${escapeHtml(step.moduleId)}</span></div><h2>${escapeHtml(story.title)}</h2><p>${escapeHtml(story.goal)}</p><nav class="timeline">${timeline}</nav></header><div class="beat-layout"><aside class="beat-copy"><div class="beat-number">${String(stepIndex + 1).padStart(2, "0")}</div><div class="actor">${escapeHtml(step.actor)}</div><h3>${escapeHtml(step.action)}</h3><p>${escapeHtml(step.outcome)}</p>${notes}</aside><div class="excerpt-stack">${excerpts}</div></div></div></section>`);
     });
   });
-  document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
-    document.querySelectorAll("[data-view]").forEach((item) => item.classList.toggle("active", item === button));
-    const side = button.dataset.view === "side";
-    document.querySelectorAll(".unified-view").forEach((item) => item.hidden = side);
-    document.querySelectorAll(".side-view").forEach((item) => item.hidden = !side);
-  }));
-  document.querySelectorAll(".expand-context").forEach((button) => button.addEventListener("click", () => {
-    const hunk = button.closest(".hunk");
-    hunk.classList.toggle("context-open");
-    button.textContent = hunk.classList.contains("context-open") ? "Hide embedded context" : "Show embedded context";
-  }));
-  document.querySelectorAll(".copy-link").forEach((button) => button.addEventListener("click", async () => {
-    const url = location.href.split("#")[0] + "#" + button.dataset.anchor;
-    try { await navigator.clipboard.writeText(url); button.textContent = "✓"; setTimeout(() => button.textContent = "#", 900); }
-    catch { location.hash = button.dataset.anchor; }
-  }));
-  document.querySelector("#download-analysis").addEventListener("click", () => {
-    const data = document.querySelector("#analysis-data").textContent;
-    const url = URL.createObjectURL(new Blob([data], { type: "application/json" }));
-    const link = Object.assign(document.createElement("a"), { href: url, download: "human-friendly-diff-analysis.json" });
-    link.click(); URL.revokeObjectURL(url);
-  });
-  document.querySelector("#collapse-all").addEventListener("click", () => {
-    document.querySelectorAll(".intent-group").forEach((group) => {
-      const hunks = group.querySelector(".hunks");
-      hunks.hidden = !hunks.hidden;
-    });
-  });
-  const search = document.querySelector("#search");
-  search.addEventListener("input", () => {
-    const query = search.value.trim().toLowerCase();
-    let visible = 0;
-    document.querySelectorAll(".intent-group").forEach((group) => {
-      const match = !query || group.textContent.toLowerCase().includes(query);
-      group.hidden = !match;
-      const nav = document.querySelector('[data-nav-group="' + group.dataset.group + '"]');
-      if (nav) nav.hidden = !match;
-      if (match) visible += 1;
-    });
-    document.querySelector("#empty-search").style.display = visible ? "none" : "block";
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "/" && document.activeElement !== search) { event.preventDefault(); search.focus(); }
-    if (event.key === "Escape" && document.activeElement === search) { search.value = ""; search.dispatchEvent(new Event("input")); search.blur(); }
-  });
-</script>
-</body>
-</html>`;
+  slides.push(`<section class="slide review-slide" id="review-notes" data-title="Review notes"><div class="slide-inner narrow"><div class="section-label">Finish the review</div><h2>Verification and safety signals</h2><ul class="verification-list">${verification}</ul><div class="coverage"><strong>${capture.stats.hunks}</strong><span>captured hunks remain reachable through the story deck</span></div></div></section>`);
+  const title = `Human-Friendly Diff — ${capture.repository.name} — ${capture.repository.branch}`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>
+  :root{color-scheme:dark;--ink:#f2f4e8;--muted:#929c8d;--bg:#090b0a;--panel:#111510;--panel2:#181d16;--line:#30372d;--acid:#e7ff55;--cyan:#6ee7e0;--red:#ff6b68;--orange:#ffad54;--green:#79dc83;--add:#102a19;--del:#321716}*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "IBM Plex Sans","Segoe UI",sans-serif}button{font:inherit;color:inherit}.deck{height:100%;overflow-y:auto;scroll-snap-type:y mandatory}.slide{min-height:100%;scroll-snap-align:start;scroll-snap-stop:always;padding:clamp(28px,4vw,64px);background:radial-gradient(circle at 85% 0,#1a2518 0,transparent 32rem),var(--bg)}.slide-inner{width:min(1500px,100%);margin:auto}.deck-title{margin-bottom:32px}.eyebrow,.section-label,.story-meta{color:var(--acid);font-size:11px;font-weight:900;letter-spacing:.16em;text-transform:uppercase}.deck-title h1{margin:8px 0;font:800 clamp(42px,6vw,82px)/.92 "Arial Narrow","Roboto Condensed",sans-serif;letter-spacing:-.04em}.deck-title h1 span{color:var(--muted)}.deck-title p,.fine-print{color:var(--muted);font-family:monospace}.overview-grid{display:grid;grid-template-columns:minmax(300px,.75fr) minmax(420px,1.25fr);gap:22px}.loc-panel,.module-panel{border:1px solid var(--line);background:var(--panel);padding:26px}.overview-grid h2,.review-slide h2{margin:5px 0 22px;font-size:30px}.loc-bars{display:grid;gap:18px}.loc-row{display:grid;grid-template-columns:70px 90px 1fr;align-items:center;gap:12px}.loc-row strong{font-size:32px}.loc-row i{height:14px;width:max(4px,min(100%,calc(var(--size) * 2px)));background:var(--green)}.loc-row.test i{background:var(--cyan)}.loc-row.other i{background:var(--orange)}.module-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.module-card{padding:15px;border:1px solid var(--line);background:var(--panel2)}.module-card span{color:var(--muted);font:11px monospace}.module-card h3{margin:8px 0 4px}.module-card p{margin:0;color:#c5ccbf}.story-head{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:30px;border-bottom:1px solid var(--line);padding-bottom:18px}.story-meta{display:flex;gap:9px;align-items:center;grid-column:1/-1}.story-head h2{margin:7px 0 0;font-size:clamp(30px,4vw,52px);line-height:1}.story-head>p{margin:8px 0;color:var(--muted)}.attention{padding:3px 7px;border:1px solid;border-radius:999px}.attention.routine{color:var(--green)}.attention.review-carefully{color:var(--orange)}.attention.critical{color:var(--red)}.timeline{grid-column:2;grid-row:2/4;display:flex;align-items:center;gap:5px}.timeline-beat{display:grid;place-items:center;min-width:48px;color:var(--muted);text-decoration:none}.timeline-beat b{display:grid;place-items:center;width:30px;height:30px;border:1px solid var(--line);border-radius:50%}.timeline-beat span{max-width:76px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:9px}.timeline-beat.active b{background:var(--acid);color:#0a0c0b;border-color:var(--acid)}.beat-layout{display:grid;grid-template-columns:minmax(220px,.34fr) minmax(0,1fr);gap:22px;padding-top:22px}.beat-copy{position:sticky;top:22px;align-self:start}.beat-number{color:#2b3428;font:900 80px/1 monospace}.actor{color:var(--cyan);font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:.12em}.beat-copy h3{margin:7px 0;font-size:30px;line-height:1.12}.beat-copy>p{color:#bec6b8}.story-notes{margin-top:20px;padding:14px;border-left:2px solid var(--orange);background:#17150f}.story-notes p{margin:4px 0;color:#c7c3b0;font-size:12px}.excerpt-stack{display:grid;gap:14px}.excerpt{min-width:0;border:1px solid var(--line);background:#0d100e}.excerpt-head{display:flex;justify-content:space-between;padding:10px 12px;background:#151a14}.excerpt-head a{color:var(--cyan);font:12px monospace;text-decoration:none}.excerpt-head span{margin-left:7px;padding:2px 5px;border:1px solid var(--line);color:var(--muted);font-size:9px;text-transform:uppercase}.excerpt-head small{color:var(--muted)}.excerpt-why{display:flex;gap:10px;margin:0;padding:9px 12px;color:#c7cec1}.excerpt-why b{color:var(--acid);font-size:9px;text-transform:uppercase;letter-spacing:.1em}.hunk-label{padding:6px 12px;background:#121812;color:#839779;font:11px monospace}.diff{overflow:auto;max-height:48vh}.diff table{width:100%;border-collapse:collapse;font:12px/1.45 monospace}.diff td{padding:0;vertical-align:top}.ln{width:48px;min-width:48px;padding:0 8px!important;background:#101310;color:#596154;text-align:right;border-right:1px solid #242a22}.marker{width:24px;min-width:24px;text-align:center}.code{white-space:pre;padding:0 10px!important}.diff-line.add,.side-line .add{background:var(--add)}.diff-line.delete,.side-line .delete{background:var(--del)}.side-view .code{width:50%;max-width:0;overflow:hidden}.file-context{border-top:1px solid var(--line)}.file-context summary{padding:9px 12px;color:var(--muted);cursor:pointer}.snapshot-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:1px;background:var(--line)}.snapshot-grid section{min-width:0;background:#0b0d0c}.snapshot-grid h5{margin:0;padding:8px 12px;background:#141813}.snapshot-grid pre{max-height:55vh;margin:0;padding:12px;overflow:auto;font:11px/1.45 monospace}.context-note,.binary,.signal{padding:14px}.critical-signal{color:#ffd3d1;background:#391817;border-left:3px solid var(--red)}.controls{position:fixed;z-index:20;right:18px;bottom:18px;display:flex;align-items:center;gap:6px;padding:7px;border:1px solid var(--line);border-radius:8px;background:#0c0f0deb;backdrop-filter:blur(14px)}.controls button{border:1px solid var(--line);background:var(--panel);padding:7px 11px;cursor:pointer}.controls button:hover,.controls button.active{border-color:var(--acid);color:var(--acid)}.progress{position:fixed;z-index:20;left:0;top:0;height:3px;background:var(--acid);transition:width .2s}.counter{min-width:74px;text-align:center;color:var(--muted);font:11px monospace}.review-slide{display:grid;place-items:center}.narrow{width:min(900px,100%)}.verification-list{padding:0;list-style:none}.verification-list li{margin:8px 0;padding:14px;border:1px solid var(--line);background:var(--panel)}.verify{display:inline-block;margin-right:8px;padding:2px 6px;font-size:10px;font-weight:900;text-transform:uppercase}.verify.passed{color:var(--green)}.verify.failed{color:var(--red)}.verify.not-run{color:var(--orange)}.coverage{display:flex;gap:18px;align-items:center;margin-top:28px}.coverage strong{font-size:62px;color:var(--acid)}.coverage span{max-width:360px;color:var(--muted)}.tok-comment{color:#6d7d67}.tok-string{color:#c7db8d}.tok-number,.tok-literal{color:#e7a96b}.tok-keyword{color:#76cfe0}:focus-visible{outline:2px solid var(--acid);outline-offset:2px}@media(max-width:850px){.overview-grid,.beat-layout{grid-template-columns:1fr}.story-head{display:block}.timeline{margin-top:12px;overflow:auto}.beat-copy{position:static}.slide{padding:24px}.diff{max-height:none}}@media print{.deck{height:auto;overflow:visible}.slide{min-height:100vh;break-after:page}.controls,.progress{display:none}.diff{max-height:none}.file-context:not([open]){display:none}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+  </style></head><body><div class="progress" id="progress"></div><main class="deck" id="deck">${slides.join("")}</main><div class="controls"><button id="prev" aria-label="Previous slide">←</button><span class="counter" id="counter"></span><button id="next" aria-label="Next slide">→</button><button class="active" data-view="unified">Unified</button><button data-view="side">Side</button></div><script id="analysis-data" type="application/json">${safeJson(analysis)}</script><script>
+  const deck=document.querySelector('#deck');const slides=[...document.querySelectorAll('.slide')];let current=0;const counter=document.querySelector('#counter');const progress=document.querySelector('#progress');
+  function show(index,behavior='smooth'){current=Math.max(0,Math.min(slides.length-1,index));slides[current].scrollIntoView({behavior,block:'start'});history.replaceState(null,'','#'+slides[current].id);counter.textContent=(current+1)+' / '+slides.length;progress.style.width=((current+1)/slides.length*100)+'%';document.title=slides[current].dataset.title+' — Human-Friendly Diff'}
+  const observer=new IntersectionObserver((entries)=>{const visible=entries.filter(e=>e.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(!visible)return;current=slides.indexOf(visible.target);counter.textContent=(current+1)+' / '+slides.length;progress.style.width=((current+1)/slides.length*100)+'%'},{root:deck,threshold:[.55]});slides.forEach(slide=>observer.observe(slide));
+  document.querySelector('#prev').addEventListener('click',()=>show(current-1));document.querySelector('#next').addEventListener('click',()=>show(current+1));document.addEventListener('keydown',(event)=>{if(event.target.closest('details,button,input,textarea'))return;if(['ArrowRight','ArrowDown','PageDown',' '].includes(event.key)){event.preventDefault();show(current+1)}if(['ArrowLeft','ArrowUp','PageUp'].includes(event.key)){event.preventDefault();show(current-1)}if(event.key==='Home')show(0);if(event.key==='End')show(slides.length-1)});
+  document.querySelectorAll('[data-view]').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('[data-view]').forEach(item=>item.classList.toggle('active',item===button));const side=button.dataset.view==='side';document.querySelectorAll('.unified-view').forEach(item=>item.hidden=side);document.querySelectorAll('.side-view').forEach(item=>item.hidden=!side)}));
+  const initial=slides.findIndex(slide=>'#'+slide.id===location.hash);show(initial>=0?initial:0,'auto');
+  </script></body></html>`;
 }
 
 function cleanupReports(directory, repoName, keepPath) {
@@ -473,7 +360,7 @@ function main() {
   try {
     if (args.analysis) input = JSON.parse(readFileSync(resolve(String(args.analysis)), "utf8"));
   } catch (error) {
-    process.stderr.write(`Analysis could not be read; rendering fallback groups: ${error.message}\n`);
+    process.stderr.write(`Analysis could not be read; rendering a fallback presentation: ${error.message}\n`);
   }
   const analysis = normalizeAnalysis(capture, input);
   const reportsDirectory = "/tmp/human-friendly-diff/reports";

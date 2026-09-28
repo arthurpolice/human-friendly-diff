@@ -5,7 +5,8 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 
-const CAPTURE_SCHEMA = "human-friendly-diff.capture/v1";
+const CAPTURE_SCHEMA = "human-friendly-diff.capture/v2";
+const MAX_SNAPSHOT_BYTES = 512 * 1024;
 
 function parseArgs(argv) {
   const result = {};
@@ -25,7 +26,7 @@ function parseArgs(argv) {
 
 function git(repo, args, options = {}) {
   return execFileSync("git", ["-C", repo, ...args], {
-    encoding: options.encoding ?? "utf8",
+    encoding: Object.hasOwn(options, "encoding") ? options.encoding : "utf8",
     maxBuffer: 1024 * 1024 * 512,
     stdio: ["ignore", "pipe", options.allowFailure ? "ignore" : "pipe"],
   });
@@ -49,6 +50,51 @@ function sha256(value) {
 
 function sanitizePath(path) {
   return path.replace(/^"|"$/g, "").replace(/^a\//, "").replace(/^b\//, "");
+}
+
+function changeKind(path) {
+  const normalized = path.toLowerCase();
+  if (/(^|\/)(?:test|tests|__tests__|spec|specs|fixtures)(\/|$)|\.(?:test|spec)\.[^/]+$/.test(normalized)) {
+    return "test";
+  }
+  if (
+    /(^|\/)(?:docs?|examples?|scripts?|config)(\/|$)/.test(normalized) ||
+    /(^|\/)(?:\.env(?:\.[^/]*)?|[^/]*config\.[^/]+)$/.test(normalized) ||
+    /(?:^|\/)(?:readme|license|changelog)(?:\.[^/]*)?$/.test(normalized) ||
+    /(?:^|\/)(?:package-lock|pnpm-lock|yarn\.lock|cargo\.lock|composer\.lock)$/.test(normalized) ||
+    /\.(?:md|mdx|txt|json|ya?ml|toml|lock)$/.test(normalized)
+  ) {
+    return "other";
+  }
+  return "production";
+}
+
+function boundedText(buffer) {
+  if (!buffer || buffer.includes(0)) return { available: false, reason: "binary" };
+  if (buffer.length > MAX_SNAPSHOT_BYTES) {
+    return { available: false, reason: "large-file", bytes: buffer.length };
+  }
+  return { available: true, text: buffer.toString("utf8"), bytes: buffer.length };
+}
+
+function captureSnapshots(repoRoot, file) {
+  let before = { available: false, reason: file.status === "added" ? "added-file" : "unavailable" };
+  let after = { available: false, reason: file.status === "deleted" ? "deleted-file" : "unavailable" };
+  if (file.status !== "added") {
+    try {
+      before = boundedText(Buffer.from(git(repoRoot, ["show", `HEAD:${file.oldPath}`], { encoding: null })));
+    } catch {
+      before = { available: false, reason: "unavailable" };
+    }
+  }
+  if (file.status !== "deleted") {
+    try {
+      after = boundedText(readFileSync(resolve(repoRoot, file.path)));
+    } catch {
+      after = { available: false, reason: "unavailable" };
+    }
+  }
+  return { before, after };
 }
 
 function parseRange(value) {
@@ -260,16 +306,29 @@ function summarize(files) {
   let additions = 0;
   let deletions = 0;
   let hunks = 0;
+  const changeLines = {
+    production: { additions: 0, deletions: 0, total: 0 },
+    test: { additions: 0, deletions: 0, total: 0 },
+    other: { additions: 0, deletions: 0, total: 0 },
+  };
   for (const file of files) {
     for (const hunk of file.hunks) {
       hunks += 1;
       for (const line of hunk.lines) {
-        if (line.kind === "add") additions += 1;
-        if (line.kind === "delete") deletions += 1;
+        if (line.kind === "add") {
+          additions += 1;
+          changeLines[file.changeKind].additions += 1;
+          changeLines[file.changeKind].total += 1;
+        }
+        if (line.kind === "delete") {
+          deletions += 1;
+          changeLines[file.changeKind].deletions += 1;
+          changeLines[file.changeKind].total += 1;
+        }
       }
     }
   }
-  return { files: files.length, hunks, additions, deletions };
+  return { files: files.length, hunks, additions, deletions, changeLines };
 }
 
 function main() {
@@ -303,6 +362,10 @@ function main() {
 
   const state = { repoRoot, staged, unstaged, conflicted };
   const files = parseDiff(rawDiff, state);
+  for (const file of files) {
+    file.changeKind = changeKind(file.path);
+    file.snapshots = captureSnapshots(repoRoot, file);
+  }
   const head = gitOptional(repoRoot, ["rev-parse", "--short=12", "HEAD"]) || "unborn";
   const branch = gitOptional(repoRoot, ["branch", "--show-current"]) || `detached@${head}`;
   const repoName = basename(repoRoot);

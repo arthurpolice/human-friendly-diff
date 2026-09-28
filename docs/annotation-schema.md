@@ -1,55 +1,55 @@
-# Annotation schema
+# Presentation analysis schema
 
-The renderer accepts `human-friendly-diff.analysis/v1`.
+The renderer accepts `human-friendly-diff.analysis/v2`. Capture IDs and line positions are the only references to source content; the renderer always uses the exact captured diff.
 
 ```json
 {
-  "schemaVersion": "human-friendly-diff.analysis/v1",
-  "reviewPath": {
-    "summary": "Suggested review sequence.",
-    "checks": ["Question for the reviewer"]
+  "schemaVersion": "human-friendly-diff.analysis/v2",
+  "overview": {
+    "modules": [{
+      "id": "payments",
+      "name": "Payment module",
+      "summary": "Authorizes and records charges.",
+      "hunkIds": ["src/payments.js::0"],
+      "secondaryHunkIds": ["src/checkout.js::0"]
+    }]
   },
-  "verification": [
-    {
-      "command": "npm test",
-      "status": "passed",
-      "note": "Observed in the active agent session"
-    }
-  ],
-  "groups": [
-    {
-      "id": "stable-purpose-slug",
-      "title": "Prevent duplicate checkout submissions",
-      "summary": "Purpose-first explanation.",
-      "attention": "routine",
-      "attentionReason": "Why this level was chosen.",
-      "confidence": "high",
-      "hunkIds": ["src/file.js::0"],
-      "crossReferences": ["another-group-id"],
-      "reviewAfter": [],
-      "risks": ["Specific risk or review question"],
-      "questions": ["Should this have a regression test?"],
-      "hunkExplanations": {
-        "src/file.js::0": "Names the symbol and explains this hunk's role."
-      }
-    }
-  ]
+  "stories": [{
+    "id": "submit-order",
+    "title": "Customer submits an order",
+    "goal": "Carry a valid order from the form to payment authorization.",
+    "summary": "Optional story context.",
+    "attention": "review-carefully",
+    "attentionReason": "Touches payment authorization.",
+    "confidence": "high",
+    "risks": ["A retry could submit twice."],
+    "questions": ["Is the request idempotent?"],
+    "steps": [{
+      "id": "form-submit",
+      "actor": "Customer",
+      "action": "Submits the checkout form",
+      "outcome": "The application constructs a payment request.",
+      "moduleId": "checkout",
+      "excerpts": [{
+        "hunkId": "src/checkout.js::0",
+        "lineStart": 2,
+        "lineEnd": 8,
+        "explanation": "Validates the form and creates the request."
+      }]
+    }]
+  }],
+  "verification": [{ "command": "npm test", "status": "passed", "note": "Observed in this session" }]
 }
 ```
 
-Rules:
+## Rules
 
-- Every hunk ID comes from the capture file. Never invent or rewrite diff text.
-- Place each hunk in one primary group.
-- Use cross-references for secondary relationships.
-- Prefer 3–8 coherent, purpose-first groups; there is no hard maximum.
-- `attention` is `routine`, `review-carefully`, or `critical`.
-- Reserve `critical` for likely secrets, destructive data changes,
-  authentication/authorization changes, irreversible migrations, unresolved
-  conflicts, or similarly severe uncertainty.
-- `confidence` is `high`, `medium`, or `low`. Low confidence raises attention
-  to at least `review-carefully`.
-- Missing or duplicate assignments are repaired by the renderer. Unassigned
-  hunks go to `Needs classification`.
-- Verification entries must report only commands actually observed in the
-  active agent session.
+- Infer functional modules from paths, symbols, project language, and call relationships—not merely repository or package names.
+- Give each hunk one primary module through `hunkIds`. `secondaryHunkIds` may overlap.
+- Order stories and beats by runtime or causal flow, not review severity.
+- A beat describes one actor action and outcome. Actors may be people, internal components, schedulers, or external systems.
+- `lineStart` and `lineEnd` are inclusive, one-based positions in the captured hunk's `lines` array. Select only the portion relevant to the beat.
+- The same excerpt may appear in multiple beats. Repetition is presentation; it does not alter canonical coverage.
+- Every hunk must be referenced by at least one excerpt. The renderer repairs omissions into a Supporting changes story.
+- `attention` is `routine`, `review-carefully`, or `critical`. `confidence` is `high`, `medium`, or `low`.
+- Verification may report only commands observed in the active agent session.

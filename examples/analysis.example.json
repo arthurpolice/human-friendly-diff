@@ -1,12 +1,6 @@
 {
-  "schemaVersion": "human-friendly-diff.analysis/v1",
-  "reviewPath": {
-    "summary": "Review behavior first, then its tests and packaging.",
-    "checks": [
-      "Does the final-state diff match the intended behavior?",
-      "Were the relevant tests actually run?"
-    ]
-  },
-  "verification": [],
-  "groups": []
+  "schemaVersion": "human-friendly-diff.analysis/v2",
+  "overview": { "modules": [] },
+  "stories": [],
+  "verification": []
 }

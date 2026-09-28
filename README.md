@@ -1,12 +1,13 @@
 # Human-Friendly Diff
 
-Human-Friendly Diff is a local Codex plugin that reorganizes the current Git
-working-tree diff around implementation intent rather than file names.
+Human-Friendly Diff is a local Codex plugin that turns the current Git
+working-tree diff into a story-driven slide presentation.
 
-It captures the exact `HEAD → working tree` snapshot (including staged,
-unstaged, and untracked files), assigns stable IDs to every hunk, and asks the
-active agent to annotate those IDs. A deterministic zero-dependency Node.js
-renderer then creates and opens one self-contained dark HTML report.
+It opens with production/test/other change-line totals and a functional module
+map, then walks through chronological system stories. Each beat shows only the
+relevant exact diff excerpt, with bounded full-file before/after snapshots for
+GitHub-like context expansion. A deterministic zero-dependency Node.js renderer
+creates one self-contained dark HTML deck.
 
 ## Requirements
 

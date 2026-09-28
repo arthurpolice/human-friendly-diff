@@ -1,6 +1,6 @@
 ---
 name: human-friendly-diff
-description: Generate and open a self-contained HTML review of the current Git working tree, grouping exact diff hunks by inferred implementation intent. Use when the user asks for a human-friendly diff, semantic diff, intent-grouped diff, or easier review of agent-generated changes.
+description: Generate and open a self-contained slide presentation of the current Git working tree, organizing exact diff excerpts into functional modules and chronological system stories. Use when the user asks for a human-friendly diff, semantic diff, story-driven diff, or easier review of agent-generated changes.
 ---
 
 # Human-Friendly Diff
@@ -37,13 +37,13 @@ Resolve this skill directory and use its plugin root for all script paths.
    inspection read-only and relevance-driven.
 5. Produce `<work-dir>/analysis.json` following
    `<plugin-root>/docs/annotation-schema.md`.
-   - Group by inferred implementation purpose, not paths.
-   - A file may contribute hunks to multiple groups.
-   - Each hunk has one primary group; use cross-references for secondary intent.
-   - Keep tests and docs with the behavior they support.
-   - Order groups by attention, then dependency/review order.
-   - Explain every hunk in one line using relevant symbols where possible.
-   - Add review questions for plausible missing companion changes.
+   - Infer functional modules more granularly than projects or packages.
+   - Build system stories ordered by runtime or causal flow.
+   - Make every story beat one actor action and outcome supported by exact code excerpts.
+   - Select only the relevant line range from a hunk; repeat excerpts when they explain multiple beats.
+   - Reference every captured hunk at least once. Put non-narrative changes in Supporting changes.
+   - Keep tests and docs with the behavior they support, while retaining their line categories on the overview.
+   - Add risks and questions to the story where they matter.
    - Report only verification actually observed in this agent session.
 6. Render and launch:
 
@@ -60,8 +60,8 @@ Resolve this skill directory and use its plugin root for all script paths.
 ## Failure behavior
 
 - Never omit or reconstruct captured diff content.
-- If context limits prevent confident grouping, classify what you can and leave
-  the rest unassigned. The renderer places it in `Needs classification`.
-- If analysis JSON is incomplete, still render; the renderer safely repairs it.
+- If context limits prevent confident storytelling, classify what you can and
+  leave the rest unassigned. The renderer places it in `Supporting changes`.
+- If analysis JSON is incomplete, still render; the renderer safely repairs module and story coverage.
 - Do not run tests or mutate the reviewed repository as part of report
   generation.

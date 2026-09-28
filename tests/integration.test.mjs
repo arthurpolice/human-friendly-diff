@@ -22,6 +22,7 @@ function fixtureRepo() {
   run("git", ["config", "user.email", "test@example.com"], repo);
   run("git", ["config", "user.name", "Test User"], repo);
   writeFileSync(resolve(repo, "checkout.js"), "export function submit(order) {\n  return order.id;\n}\n");
+  writeFileSync(resolve(repo, "checkout.test.js"), "import { submit } from './checkout.js';\nvoid submit;\n");
   writeFileSync(resolve(repo, "README.md"), "# Fixture\n");
   run("git", ["add", "."], repo);
   run("git", ["commit", "-qm", "initial"], repo);
@@ -42,14 +43,19 @@ test("capture combines staged, unstaged, and untracked changes with stable hunk 
     "export function submit(order) {\n  if (!order.id) throw new Error('missing id');\n  return String(order.id);\n}\n",
   );
   writeFileSync(resolve(repo, "token.js"), "export const apiKey = 'super-secret-value';\n");
+  writeFileSync(resolve(repo, "checkout.test.js"), "import { submit } from './checkout.js';\nsubmit({ id: 42 });\n");
 
   run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT);
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
 
   assert.equal(capture.clean, false);
+  assert.equal(capture.schemaVersion, "human-friendly-diff.capture/v2");
   assert.equal(capture.repository.name, repo.split("/").at(-1));
   assert.ok(capture.files.some((file) => file.path === "checkout.js" && file.stageState === "mixed"));
   assert.ok(capture.files.some((file) => file.path === "token.js"));
+  assert.ok(capture.stats.changeLines.production.total > 0);
+  assert.ok(capture.stats.changeLines.test.total > 0);
+  assert.ok(capture.files.find((file) => file.path === "checkout.js").snapshots.after.available);
   const ids = capture.files.flatMap((file) => file.hunks.map((hunk) => hunk.id));
   assert.equal(new Set(ids).size, ids.length);
   assert.ok(
@@ -59,7 +65,7 @@ test("capture combines staged, unstaged, and untracked changes with stable hunk 
   );
 });
 
-test("renderer preserves every hunk and falls back to Needs classification", () => {
+test("renderer preserves every hunk and falls back to Supporting changes", () => {
   const repo = fixtureRepo();
   const capturePath = resolve(repo, "capture.json");
   const analysisPath = resolve(repo, "analysis.json");
@@ -84,7 +90,10 @@ test("renderer preserves every hunk and falls back to Needs classification", () 
 
   const capture = JSON.parse(readFileSync(capturePath, "utf8"));
   const html = readFileSync(reportPath, "utf8");
-  assert.match(html, /Needs classification/);
+  assert.match(html, /Supporting changes/);
+  assert.match(html, /class="slide overview-slide"/);
+  assert.match(html, /Production vs tests/);
+  assert.match(html, /id="next"/);
   assert.doesNotMatch(html, /<script>alert\('nope'\)<\/script>/);
   for (const hunk of capture.files.flatMap((file) => file.hunks)) {
     const anchor = hunk.id.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -105,16 +114,25 @@ test("deterministic secret findings raise an annotated group to critical", () =>
   writeFileSync(
     analysisPath,
     JSON.stringify({
-      schemaVersion: "human-friendly-diff.analysis/v1",
-      groups: [
+      schemaVersion: "human-friendly-diff.analysis/v2",
+      overview: {
+        modules: [{ id: "configuration", name: "Configuration module", hunkIds: [hunkId] }],
+      },
+      stories: [
         {
           id: "config",
-          title: "Configure service",
-          summary: "Adds local configuration.",
+          title: "Service starts with local configuration",
+          goal: "Make the credential available to the service.",
           attention: "routine",
           confidence: "high",
-          hunkIds: [hunkId],
-          hunkExplanations: { [hunkId]: "Adds the service credential." },
+          steps: [{
+            id: "load-config",
+            actor: "Service",
+            action: "Loads its local configuration",
+            outcome: "The credential becomes available.",
+            moduleId: "configuration",
+            excerpts: [{ hunkId, explanation: "Adds the service credential." }]
+          }]
         },
       ],
     }),
@@ -135,4 +153,38 @@ test("deterministic secret findings raise an annotated group to critical", () =>
   const html = readFileSync(reportPath, "utf8");
   assert.match(html, /attention critical/);
   assert.match(html, /Potential secret pattern detected/);
+});
+
+test("renderer allows repeated sliced excerpts across chronological story beats", () => {
+  const repo = fixtureRepo();
+  const capturePath = resolve(repo, "capture.json");
+  const analysisPath = resolve(repo, "analysis.json");
+  const reportPath = resolve(repo, "report.html");
+  writeFileSync(resolve(repo, "checkout.js"), "export function submit(order) {\n  if (!order.id) throw new Error('missing id');\n  return String(order.id);\n}\n");
+  run("node", [resolve(ROOT, "scripts/capture.mjs"), "--repo", repo, "--output", capturePath], ROOT);
+  const capture = JSON.parse(readFileSync(capturePath, "utf8"));
+  const hunkId = capture.files.find((file) => file.path === "checkout.js").hunks[0].id;
+  writeFileSync(analysisPath, JSON.stringify({
+    schemaVersion: "human-friendly-diff.analysis/v2",
+    overview: { modules: [{ id: "checkout", name: "Checkout module", summary: "Submits orders.", hunkIds: [hunkId] }] },
+    stories: [{
+      id: "checkout",
+      title: "Customer submits checkout",
+      goal: "Validate and return the order identifier.",
+      attention: "routine",
+      confidence: "high",
+      steps: [
+        { id: "validate", actor: "Checkout", action: "Validates the order", outcome: "Invalid orders stop.", moduleId: "checkout", excerpts: [{ hunkId, lineStart: 2, lineEnd: 2, explanation: "Validation line." }] },
+        { id: "respond", actor: "Checkout", action: "Returns the identifier", outcome: "The caller receives a string.", moduleId: "checkout", excerpts: [{ hunkId, lineStart: 2, lineEnd: 4, explanation: "Same hunk reused for the response." }] }
+      ]
+    }],
+    verification: []
+  }));
+  run("node", [resolve(ROOT, "scripts/render.mjs"), "--capture", capturePath, "--analysis", analysisPath, "--output", reportPath], ROOT);
+  const html = readFileSync(reportPath, "utf8");
+  assert.match(html, /Customer submits checkout/);
+  assert.match(html, /Validation line/);
+  assert.match(html, /Same hunk reused for the response/);
+  assert.equal((html.match(/checkout\.js/g) || []).length >= 2, true);
+  assert.match(html, /Expand full file context/);
 });
